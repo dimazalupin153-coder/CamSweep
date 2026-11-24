@@ -1,0 +1,41 @@
+name: Build iOS IPA
+on: [push, workflow_dispatch]
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+    - uses: actions/checkout@v3
+    - name: Install XcodeGen
+      run: brew install xcodegen
+    - name: Create project.yml
+      run: |
+        cat <<EOF > project.yml
+        name: CamSweep
+        options:
+          bundleIdPrefix: com.anon
+        targets:
+          CamSweep:
+            type: application
+            platform: iOS
+            deploymentTarget: "15.0"
+            sources: [CamSweep]
+            settings:
+              base:
+                INFOPLIST_FILE: CamSweep/Info.plist
+                PRODUCT_BUNDLE_IDENTIFIER: com.anon.camsweep
+        EOF
+    - name: Generate Xcode project
+      run: xcodegen generate
+    - name: Build and Archive
+      run: |
+        xcodebuild -project CamSweep.xcodeproj -scheme CamSweep -sdk iphoneos -configuration Release -derivedDataPath build CODE_SIGNING_ALLOWED=NO
+    - name: Package IPA
+      run: |
+        mkdir Payload
+        cp -r build/Build/Products/Release-iphoneos/CamSweep.app Payload/
+        zip -r CamSweep.ipa Payload
+    - name: Upload IPA
+      uses: actions/upload-artifact@v3
+      with:
+        name: CamSweep-ipa
+        path: CamSweep.ipa
